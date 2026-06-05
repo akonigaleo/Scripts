@@ -1,0 +1,69 @@
+# Load SQL Server module
+Import-Module SqlServer
+
+# ===========================
+# CONFIGURATION
+# ===========================
+$SqlInstance = "ServerName"              # e.g. "SQLPROD01"
+$BackupShare = "E:\MSSQL\Adhoc_Backup"   # UNC path
+$DataPath    = "E:\MSSQL\Data"                # Restore data files
+$LogPath     = "G:\MSSQL\Log"                # Restore log files
+
+# ===========================
+# GET ALL BACKUP FILES
+# ===========================
+$BackupFiles = Get-ChildItem -Path $BackupShare -Filter "*.bak"
+
+foreach ($file in $BackupFiles) {
+
+    Write-Host "Processing backup file: $($file.FullName)..."
+
+    # Get backup metadata
+    $fileList = Invoke-Sqlcmd -ServerInstance $SqlInstance `
+        -Query "RESTORE FILELISTONLY FROM DISK = N'$($file.FullName)'"
+
+    # Extract database name from backup
+    $header = Invoke-Sqlcmd -ServerInstance $SqlInstance `
+        -Query "RESTORE HEADERONLY FROM DISK = N'$($file.FullName)'"
+
+    $dbName = $header.DatabaseName
+
+    Write-Host "Restoring database: $dbName"
+
+    # Build MOVE clauses dynamically
+    $moveClauses = @()
+
+    foreach ($row in $fileList) {
+        if ($row.Type -eq "D") {
+            $newPath = Join-Path $DataPath ($row.LogicalName + ".mdf")
+        }
+        elseif ($row.Type -eq "L") {
+            $newPath = Join-Path $LogPath ($row.LogicalName + ".ldf")
+        }
+
+        $moveClauses += "MOVE N'$($row.LogicalName)' TO N'$newPath'"
+    }
+
+    $moveSql = $moveClauses -join ",`n    "
+
+    # Build restore query
+    $restoreQuery = @"
+RESTORE DATABASE [$dbName]
+FROM DISK = N'$($file.FullName)'
+WITH 
+    REPLACE,
+    RECOVERY,
+    STATS = 10,
+    $moveSql;
+"@
+
+    try {
+        Invoke-Sqlcmd -ServerInstance $SqlInstance -Query $restoreQuery -QueryTimeout 0
+        Write-Host "✅ Successfully restored $dbName"
+    }
+    catch {
+        Write-Host "❌ Failed to restore $dbName - $($_.Exception.Message)"
+    }
+}
+
+Write-Host "🎉 All restore operations completed."
